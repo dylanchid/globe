@@ -79,6 +79,27 @@ BRAILLE_DOT_MAP = {
 BRAILLE_BITS = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80]
 
 # =============================================================================
+# RENDERING CONSTANTS
+# =============================================================================
+
+# Lighting
+LIGHT_DIRECTION = (0.6, 0.5, 0.6)
+SPECULAR_OFFSET_X = 0.25
+SPECULAR_OFFSET_Y = -0.15
+SPECULAR_SIZE_THRESHOLD = 0.12
+SPECULAR_INTENSITY_THRESHOLD = 0.4
+
+# Atmosphere
+ATMOSPHERE_RADIUS_RATIO = 1.12
+ATMOSPHERE_GLOW_THRESHOLD = 0.2
+ATMOSPHERE_HIGH_THRESHOLD = 0.7
+ATMOSPHERE_MED_THRESHOLD = 0.4
+
+# Animation
+FRAME_DELAY = 0.03
+INTERACTIVE_ROTATION_STEP = 0.12
+
+# =============================================================================
 # COLOR DEFINITIONS
 # =============================================================================
 
@@ -602,13 +623,13 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
     WIDTH, HEIGHT = get_size()
     
     # Light direction (constant - sun doesn't move when toggling night mode)
-    light_dir = (0.6, 0.5, 0.6)
+    light_dir = LIGHT_DIRECTION
     light_mag = math.sqrt(sum(c*c for c in light_dir))
     light_dir = tuple(c / light_mag for c in light_dir)
     
     # Specular highlight center (in screen space, relative to globe center)
-    spec_offset_x = 0.25
-    spec_offset_y = -0.15
+    spec_offset_x = SPECULAR_OFFSET_X
+    spec_offset_y = SPECULAR_OFFSET_Y
     
     # Braille grid: each cell is 2 columns x 4 rows of dots
     cell_width = WIDTH
@@ -732,7 +753,7 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
                             spec_dx = nx - spec_offset_x
                             spec_dy = ny - spec_offset_y
                             spec_dist = math.sqrt(spec_dx * spec_dx + spec_dy * spec_dy)
-                            if spec_dist < 0.12 and intensity > 0.4:
+                            if spec_dist < SPECULAR_SIZE_THRESHOLD and intensity > SPECULAR_INTENSITY_THRESHOLD:
                                 is_specular[cy][cx] = True
     
     # Now build the final output grid
@@ -818,13 +839,13 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
                     ny = (cy + 0.5 - center_y) / sphere_radius_y
                     r = math.sqrt(nx * nx + ny * ny)
                     
-                    if 1.0 < r < 1.12:
-                        glow = 1.0 - (r - 1.0) / 0.12
-                        if glow > 0.2:
+                    if 1.0 < r < ATMOSPHERE_RADIUS_RATIO:
+                        glow = 1.0 - (r - 1.0) / (ATMOSPHERE_RADIUS_RATIO - 1.0)
+                        if glow > ATMOSPHERE_GLOW_THRESHOLD:
                             # Use partial Braille for glow - select dots based on position
-                            if glow > 0.7:
+                            if glow > ATMOSPHERE_HIGH_THRESHOLD:
                                 final_grid[cy][cx] = 0x66  # ⡦ middle dots
-                            elif glow > 0.4:
+                            elif glow > ATMOSPHERE_MED_THRESHOLD:
                                 final_grid[cy][cx] = 0x24  # ⠤ some dots
                             else:
                                 final_grid[cy][cx] = 0x04  # ⠄ minimal
@@ -933,15 +954,15 @@ def main():
                     if next1 == '[':
                         arrow = sys.stdin.read(1)
                         if arrow in ['C', 'A']:
-                            theta += 0.12
+                            theta += INTERACTIVE_ROTATION_STEP
                         elif arrow in ['D', 'B']:
-                            theta -= 0.12
+                            theta -= INTERACTIVE_ROTATION_STEP
             
             if not paused:
                 theta += CONFIG.rotation_speed
             
             frame_count += 1
-            time.sleep(0.03)
+            time.sleep(FRAME_DELAY)
     
     except KeyboardInterrupt:
         pass
