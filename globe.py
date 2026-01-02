@@ -647,9 +647,19 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
     center_x = WIDTH / 2
     center_y = HEIGHT / 2
     
+    # Optimization: Pre-compute rotation trig values
+    cos_theta = math.cos(-theta)
+    sin_theta = math.sin(-theta)
+    
+    # Optimization: Calculate bounding box to skip empty space
+    min_cx = max(0, int(center_x - sphere_radius_x - 1))
+    max_cx = min(cell_width, int(center_x + sphere_radius_x + 1))
+    min_cy = max(0, int(center_y - sphere_radius_y - 1))
+    max_cy = min(cell_height, int(center_y + sphere_radius_y + 1))
+    
     # Sample each Braille dot position
-    for cy in range(cell_height):
-        for cx in range(cell_width):
+    for cy in range(min_cy, max_cy):
+        for cx in range(min_cx, max_cx):
             # Sample each of the 8 dots in the Braille cell
             for dot_col in range(2):
                 for dot_row in range(4):
@@ -677,11 +687,16 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
                     # In our convention: x=right, z=up, y=depth(into screen)
                     sx, sy, sz = nx, nz, -ny  # Remap: screen_y becomes -z (up)
                     
-                    # Rotate around Z axis (Earth's spin)
-                    rx, ry, rz = rotate_z(sx, sy, sz, -theta)
+                    # Rotate around Z axis (Earth's spin) - Inlined for performance
+                    # rx, ry, rz = rotate_z(sx, sy, sz, -theta)
+                    rx = cos_theta * sx - sin_theta * sy
+                    ry = sin_theta * sx + cos_theta * sy
+                    rz = sz
                     
-                    # Get lat/lon at this rotated position
-                    lat, lon = to_latlon(rx, ry, rz)
+                    # Get lat/lon at this rotated position - Inlined for performance
+                    # lat, lon = to_latlon(rx, ry, rz)
+                    lat = math.degrees(math.asin(max(-1.0, min(1.0, rz))))
+                    lon = math.degrees(math.atan2(ry, rx))
                     
                     # Sample terrain
                     terrain_is_land = is_land(lat, lon)
