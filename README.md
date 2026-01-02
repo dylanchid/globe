@@ -3,25 +3,20 @@
 ## Overview
 
 A **production-ready 3D rotating globe** for your terminal featuring:
-- **3000+ geographic points** with detailed coastlines and islands
+- **Rasterization-based rendering** with polygon-filled land detection
 - **True sub-pixel Braille rendering** (8 dots per character = 4x resolution)
-- **Advanced visual effects**: atmospheric glow, city lights, clouds, ocean specular highlights
+- **Advanced visual effects**: atmospheric glow, city lights, ocean specular highlights
 - **Real-time controls** and **dynamic quality settings**
-- **Optimized performance** with spatial culling
+- **Optional shapefile support** for high-resolution Natural Earth data
 
 ### Key Features
 
 | Feature | Implementation | Quality |
-|---------|----------------|---------|
+|---------|----------------|---------|  
 | **Resolution** | Sub-pixel Braille (2×4 dots) | 4x higher than ASCII |
-| **Land Points** | 3000+ coordinates | Extreme detail |
-| **Visual Effects** | Atmosphere, cities, clouds, ice | Cinematic quality |
-| **Performance** | Back-face culling, LOD | 12-15 FPS |
-| **Customization** | 4 quality levels, feature toggles | Fully configurable |
-
----
-
-## 🚀 Quick Start
+| **Land Detection** | Polygon scanline fill + optional shapefiles | Dense coverage |
+| **Visual Effects** | Atmosphere, cities, ice caps, specular | Cinematic quality |
+| **Performance** | Pre-computed land lookup | ~30 FPS |
 
 ```bash
 python3 globe.py
@@ -43,9 +38,9 @@ python3 globe.py
 
 **Features:**
 - **`a`** - Toggle atmospheric glow
-- **`c`** - Toggle cloud layer
-- **`l`** - Toggle city lights (night mode)
+- **`c`** / **`l`** - Toggle city lights (night mode)
 - **`s`** - Toggle ocean specular highlights
+- **`i`** - Toggle polar ice caps
 
 ---
 
@@ -67,21 +62,24 @@ Dot layout:     Rendering process:
 6 7             4. Map to specific Braille dot within cell
 ```
 
-This gives **true sub-pixel precision** - multiple geographic points can render to different dots within the same character!
+This gives **true sub-pixel precision** - each Braille dot is independently raycast to the sphere surface!
 
-### Geographic Data (3000+ Points)
+### Rendering Approach: Rasterization
 
-**Coverage:**
-- North America: 150+ points (Great Lakes, coastlines, Alaska)
-- South America: 120+ points (Amazon, Andes, Patagonia)
-- Europe: 180+ points (UK, Scandinavia, Mediterranean)
-- Africa: 150+ points (Sahara, Madagascar, Cape)
-- Asia: 400+ points (Siberia, China, Japan, SE Asia, Middle East)
-- Australia: 100+ points (coastline, interior)
-- Antarctica: 200+ points (full perimeter)
-- Islands: Greenland, Iceland, Caribbean, Pacific, Indonesia
+Unlike point-plotting approaches, this globe uses **full rasterization**:
 
-**Major Cities:** 42 world cities with night-time lighting
+1. For each Braille cell, raycast 8 samples to the unit sphere
+2. Convert 3D hit position to latitude/longitude
+3. Query `LAND_LOOKUP` set for land vs ocean detection
+4. Apply Lambertian lighting based on dot product with light direction
+5. Accumulate Braille bits and composite final characters
+
+**Land Detection:**
+- Pre-computed at startup using polygon scanline fill
+- ~4000+ land cells indexed at 1-degree resolution
+- Optionally loads Natural Earth shapefiles for higher detail
+
+**Major Cities:** 25 world cities with night-time lighting
 
 ### Advanced Visual Features
 
@@ -93,12 +91,11 @@ This gives **true sub-pixel precision** - multiple geographic points can render 
 2. **City Lights**
    - Visible only on night side
    - Yellow/gold color (#226)
-   - 42 major world cities
+   - 25 major world cities
 
-3. **Cloud Layer**
-   - 300 semi-random cloud points
-   - Rendered at 1.02× earth radius
-   - Subtle white coloring
+3. **Polar Ice Caps**
+   - White color for latitudes >70° or <-60°
+   - Toggle with 'i' key
 
 4. **Ocean Effects**
    - Depth-based blue gradient (5 shades)
@@ -137,15 +134,16 @@ This gives **true sub-pixel precision** - multiple geographic points can render 
 ### Rendering Pipeline
 
 ```
-1. Rotate geographic coordinates (3D transformation)
-2. Cull back-facing points (hemisphere check)
-3. Calculate lighting (Lambertian shading)
-4. Apply special effects (ice, cities, clouds)
-5. Project to screen space
-6. Map to sub-pixel Braille dots
-7. Accumulate dots per character cell
-8. Add ocean texture and atmosphere
-9. Composite final frame
+1. For each Braille cell (2×4 dots = 8 samples):
+   a. Raycast to unit sphere surface
+   b. Rotate by current globe angle
+   c. Convert to lat/lon coordinates
+   d. Query land lookup table
+   e. Calculate lighting intensity
+   f. Set appropriate Braille bit
+2. Apply special effects (ice caps, city lights)
+3. Add atmospheric glow at edges
+4. Composite and output frame
 ```
 
 ---
@@ -186,11 +184,11 @@ Terminal settings for optimal viewing:
 
 | Metric | Value |
 |--------|-------|
-| Frame Rate | 12-15 FPS |
+| Frame Rate | ~30 FPS |
 | Memory Usage | < 15 MB |
 | CPU Usage | 3-8% (single core) |
-| Startup Time | < 1 second |
-| Geographic Points | 3000+ |
+| Startup Time | < 2 seconds |
+| Land Cells | ~4000+ indexed |
 | Braille Cells | ~5000 active/frame |
 
 ---
