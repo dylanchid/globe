@@ -58,7 +58,7 @@ CONFIG = GlobeConfig()
 
 def get_size():
     size = get_terminal_size(fallback=(120, 40))
-    return size.columns, size.lines - 3
+    return max(1, size.columns), max(1, size.lines - 3)
 
 WIDTH, HEIGHT = get_size()
 RESET = '\033[0m'
@@ -77,6 +77,26 @@ BRAILLE_DOT_MAP = {
     (0, 3): 6, (1, 3): 7,
 }
 BRAILLE_BITS = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80]
+
+# Dot sampling patterns by detail level (lower levels sample fewer dots)
+DOT_SAMPLES_BY_DETAIL = {
+    1: [(0, 1), (1, 2)],
+    2: [(0, 1), (1, 1), (0, 2), (1, 2)],
+    3: [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
+    4: [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2), (0, 3), (1, 3)],
+}
+
+DOT_SAMPLE_CACHE = {
+    level: [
+        (
+            (col + 0.5) / 2.0,
+            (row + 0.5) / 4.0,
+            BRAILLE_BITS[BRAILLE_DOT_MAP[(col, row)]],
+        )
+        for col, row in samples
+    ]
+    for level, samples in DOT_SAMPLES_BY_DETAIL.items()
+}
 
 # =============================================================================
 # RENDERING CONSTANTS
@@ -664,6 +684,9 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
     
     sphere_radius_x = min(max_radius_x, max_radius_y * char_aspect)
     sphere_radius_y = sphere_radius_x / char_aspect
+
+    if sphere_radius_x <= 0 or sphere_radius_y <= 0:
+        return ""
     
     center_x = WIDTH / 2
     center_y = HEIGHT / 2
@@ -677,84 +700,76 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
     max_cx = min(cell_width, int(center_x + sphere_radius_x + 1))
     min_cy = max(0, int(center_y - sphere_radius_y - 1))
     max_cy = min(cell_height, int(center_y + sphere_radius_y + 1))
-    
+
+    dot_samples = DOT_SAMPLE_CACHE.get(CONFIG.detail_level, DOT_SAMPLE_CACHE[4])
+
     # Sample each Braille dot position
     for cy in range(min_cy, max_cy):
         for cx in range(min_cx, max_cx):
-            # Sample each of the 8 dots in the Braille cell
-            for dot_col in range(2):
-                for dot_row in range(4):
-                    # Sub-pixel position within the cell
-                    sub_x = (dot_col + 0.5) / 2.0  # 0.25 or 0.75
-                    sub_y = (dot_row + 0.5) / 4.0  # 0.125, 0.375, 0.625, 0.875
-                    
-                    # Screen position
-                    px = cx + sub_x
-                    py = cy + sub_y
-                    
-                    # Normalize to sphere coordinates (-1 to 1)
-                    nx = (px - center_x) / sphere_radius_x
-                    ny = (py - center_y) / sphere_radius_y
-                    
-                    # Check if within sphere radius
-                    r2 = nx * nx + ny * ny
-                    if r2 > 1.0:
-                        continue  # Outside globe - don't set any dot
-                    
-                    # Compute Z on unit sphere (front-facing)
-                    nz = math.sqrt(1.0 - r2)
-                    
-                    # Convert from screen coords to 3D sphere point
-                    # In our convention: x=right, z=up, y=depth(into screen)
-                    sx, sy, sz = nx, nz, -ny  # Remap: screen_y becomes -z (up)
-                    
-                    # Rotate around Z axis (Earth's spin) - Inlined for performance
-                    # rx, ry, rz = rotate_z(sx, sy, sz, -theta)
-                    rx = cos_theta * sx - sin_theta * sy
-                    ry = sin_theta * sx + cos_theta * sy
-                    rz = sz
-                    
-                    # Get lat/lon at this rotated position - Inlined for performance
-                    # lat, lon = to_latlon(rx, ry, rz)
-                    lat = math.degrees(math.asin(max(-1.0, min(1.0, rz))))
-                    lon = math.degrees(math.atan2(ry, rx))
-                    
-                    # Sample terrain
-                    terrain_is_land = is_land(lat, lon)
-                    terrain_is_polar = is_polar(lat)
-                    
-                    # Calculate lighting
-                    intensity = max(0, rx * light_dir[0] + ry * light_dir[1] + rz * light_dir[2])
-                    
-                    # Get the Braille dot index
-                    dot_idx = BRAILLE_DOT_MAP[(dot_col, dot_row)]
-                    dot_bit = BRAILLE_BITS[dot_idx]
-                    
-                    # Determine what type of surface this is and set appropriate dot
-                    if terrain_is_polar and CONFIG.enable_polar_ice:
-                        # Polar ice caps - treat as special land
-                        land_grid[cy][cx] |= dot_bit
-                        land_intensities[cy][cx] += intensity
-                        land_counts[cy][cx] += 1
-                        is_polar_cell[cy][cx] = True
-                    elif terrain_is_land:
-                        # Land - set dot in land grid
-                        land_grid[cy][cx] |= dot_bit
-                        land_intensities[cy][cx] += intensity
-                        land_counts[cy][cx] += 1
-                    else:
-                        # Ocean - set dot in ocean grid
-                        ocean_grid[cy][cx] |= dot_bit
-                        ocean_intensities[cy][cx] += intensity
-                        ocean_counts[cy][cx] += 1
-                        
-                        # Check for specular highlight
-                        if CONFIG.enable_ocean_specular:
-                            spec_dx = nx - spec_offset_x
-                            spec_dy = ny - spec_offset_y
-                            spec_dist = math.sqrt(spec_dx * spec_dx + spec_dy * spec_dy)
-                            if spec_dist < SPECULAR_SIZE_THRESHOLD and intensity > SPECULAR_INTENSITY_THRESHOLD:
-                                is_specular[cy][cx] = True
+            for sub_x, sub_y, dot_bit in dot_samples:
+                # Screen position
+                px = cx + sub_x
+                py = cy + sub_y
+
+                # Normalize to sphere coordinates (-1 to 1)
+                nx = (px - center_x) / sphere_radius_x
+                ny = (py - center_y) / sphere_radius_y
+
+                # Check if within sphere radius
+                r2 = nx * nx + ny * ny
+                if r2 > 1.0:
+                    continue  # Outside globe - don't set any dot
+
+                # Compute Z on unit sphere (front-facing)
+                nz = math.sqrt(1.0 - r2)
+
+                # Convert from screen coords to 3D sphere point
+                # In our convention: x=right, z=up, y=depth(into screen)
+                sx, sy, sz = nx, nz, -ny  # Remap: screen_y becomes -z (up)
+
+                # Rotate around Z axis (Earth's spin) - Inlined for performance
+                # rx, ry, rz = rotate_z(sx, sy, sz, -theta)
+                rx = cos_theta * sx - sin_theta * sy
+                ry = sin_theta * sx + cos_theta * sy
+                rz = sz
+
+                # Get lat/lon at this rotated position - Inlined for performance
+                # lat, lon = to_latlon(rx, ry, rz)
+                lat = math.degrees(math.asin(max(-1.0, min(1.0, rz))))
+                lon = math.degrees(math.atan2(ry, rx))
+
+                # Sample terrain
+                terrain_is_land = is_land(lat, lon)
+                terrain_is_polar = is_polar(lat)
+
+                # Calculate lighting
+                intensity = max(0, rx * light_dir[0] + ry * light_dir[1] + rz * light_dir[2])
+
+                # Determine what type of surface this is and set appropriate dot
+                if terrain_is_polar and CONFIG.enable_polar_ice:
+                    # Polar ice caps - treat as special land
+                    land_grid[cy][cx] |= dot_bit
+                    land_intensities[cy][cx] += intensity
+                    land_counts[cy][cx] += 1
+                    is_polar_cell[cy][cx] = True
+                elif terrain_is_land:
+                    # Land - set dot in land grid
+                    land_grid[cy][cx] |= dot_bit
+                    land_intensities[cy][cx] += intensity
+                    land_counts[cy][cx] += 1
+                else:
+                    # Ocean - set dot in ocean grid
+                    ocean_grid[cy][cx] |= dot_bit
+                    ocean_intensities[cy][cx] += intensity
+                    ocean_counts[cy][cx] += 1
+
+                    # Check for specular highlight
+                    if CONFIG.enable_ocean_specular:
+                        spec_dx = nx - spec_offset_x
+                        spec_dy = ny - spec_offset_y
+                        spec_dist = math.sqrt(spec_dx * spec_dx + spec_dy * spec_dy)
+                        if spec_dist < SPECULAR_SIZE_THRESHOLD and intensity > SPECULAR_INTENSITY_THRESHOLD:
+                            is_specular[cy][cx] = True
     
     # Now build the final output grid
     # Strategy: Show LAND with Braille dots, ocean as a subtle background
@@ -890,6 +905,10 @@ def get_key():
 # =============================================================================
 
 def main():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("This program requires an interactive TTY.")
+        return
+
     theta = 0.0
     night_mode = False
     paused = False
