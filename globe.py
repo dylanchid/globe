@@ -154,6 +154,22 @@ ICE_COLOR = '\033[38;5;255m'       # White
 ATMOSPHERE_COLOR = '\033[38;5;45m' # Cyan glow
 CITY_COLOR = '\033[38;5;226m'      # Yellow
 
+# OPTIMIZATION: Pre-compute color-character combinations to eliminate string formatting in hot path
+def _build_braille_cache():
+    """Pre-compute all color + Braille character combinations"""
+    cache = {}
+    all_colors = (
+        LAND_COLORS + LAND_NIGHT_COLORS + OCEAN_COLORS + 
+        [OCEAN_SPECULAR, ICE_COLOR, ATMOSPHERE_COLOR, CITY_COLOR]
+    )
+    for color in all_colors:
+        for bits in range(256):  # All possible Braille patterns
+            char = chr(BRAILLE_BASE + bits)
+            cache[(color, bits)] = f"{color}{char}{RESET}"
+    return cache
+
+BRAILLE_CACHE = _build_braille_cache()
+
 # =============================================================================
 # COMPREHENSIVE LAND DATA
 # =============================================================================
@@ -581,22 +597,55 @@ def build_land_lookup() -> Set[Tuple[int, int]]:
     
     return land_cells
 
+# OPTIMIZATION: Use 2D array for land lookup instead of Set for better cache locality
+class LandGrid:
+    """Fast 2D grid-based land detection (no hash overhead)"""
+    def __init__(self):
+        # 180 rows (lat: -90 to 90) × 360 columns (lon: -180 to 180)
+        self.grid = bytearray(180 * 360)
+        self.count = 0
+    
+    def add_land(self, lat_i: int, lon_i: int):
+        """Mark a cell as land"""
+        # Normalize coordinates
+        if -90 <= lat_i <= 89 and -180 <= lon_i <= 179:
+            row = lat_i + 90
+            col = lon_i + 180
+            if self.grid[row * 360 + col] == 0:
+                self.grid[row * 360 + col] = 1
+                self.count += 1
+    
+    def is_land(self, lat_i: int, lon_i: int) -> bool:
+        """Check if a cell is land (O(1) lookup, no hashing)"""
+        # Normalize longitude to -180 to 179
+        while lon_i > 179:
+            lon_i -= 360
+        while lon_i < -180:
+            lon_i += 360
+        
+        if -90 <= lat_i <= 89 and -180 <= lon_i <= 179:
+            row = lat_i + 90
+            col = lon_i + 180
+            return self.grid[row * 360 + col] == 1
+        return False
+
 # Pre-compute land lookup at module load
 print("Building land lookup table...", flush=True)
-LAND_LOOKUP = build_land_lookup()
-print(f"  {len(LAND_LOOKUP)} land cells indexed")
+land_cells = build_land_lookup()
+LAND_GRID = LandGrid()
+for lat_i, lon_i in land_cells:
+    LAND_GRID.add_land(lat_i, lon_i)
+print(f"  {LAND_GRID.count} land cells indexed")
+
+# Keep LAND_LOOKUP for compatibility with status display
+LAND_LOOKUP = land_cells
 
 def is_land(lat: float, lon: float) -> bool:
-    """Fast land detection using pre-computed lookup"""
-    # Normalize longitude to -180 to 180
-    while lon > 180:
-        lon -= 360
-    while lon < -180:
-        lon += 360
-    
-    # Check exact cell and neighbors for smoothness
-    lat_i, lon_i = int(round(lat)), int(round(lon))
-    return (lat_i, lon_i) in LAND_LOOKUP
+    """Fast land detection using 2D grid (optimized for cache locality)"""
+    # Round to nearest degree
+    lat_i = int(round(lat))
+    lon_i = int(round(lon))
+    return LAND_GRID.is_land(lat_i, lon_i)
 
 def is_polar(lat: float) -> bool:
     """Check if latitude is in polar ice region"""
@@ -631,6 +680,50 @@ def rotate_z(x: float, y: float, z: float, theta: float) -> Tuple[float, float, 
 # RASTERIZATION-BASED RENDERING
 # =============================================================================
 
+# OPTIMIZATION: Grid allocation caching - reuse across frames instead of allocating new
+_grid_cache = {}
+
+def get_or_create_grids(width: int, height: int):
+    """Get cached grids or create new ones if needed"""
+    key = (width, height)
+    if key not in _grid_cache:
+        _grid_cache[key] = {
+            'land_grid': [[0 for _ in range(width)] for _ in range(height)],
+            'ocean_grid': [[0 for _ in range(width)] for _ in range(height)],
+            'land_intensities': [[0.0 for _ in range(width)] for _ in range(height)],
+            'ocean_intensities': [[0.0 for _ in range(width)] for _ in range(height)],
+            'land_counts': [[0 for _ in range(width)] for _ in range(height)],
+            'ocean_counts': [[0 for _ in range(width)] for _ in range(height)],
+            'is_specular': [[False for _ in range(width)] for _ in range(height)],
+            'is_polar_cell': [[False for _ in range(width)] for _ in range(height)],
+            'final_grid': [[0 for _ in range(width)] for _ in range(height)],
+            'final_colors': [[None for _ in range(width)] for _ in range(height)],
+        }
+    else:
+        # Clear cached grids
+        cache = _grid_cache[key]
+        for grid in [cache['land_grid'], cache['ocean_grid'], cache['land_counts'], 
+                     cache['ocean_counts'], cache['final_grid']]:
+            for row in grid:
+                for i in range(len(row)):
+                    row[i] = 0
+        
+        for grid in [cache['land_intensities'], cache['ocean_intensities']]:
+            for row in grid:
+                for i in range(len(row)):
+                    row[i] = 0.0
+        
+        for grid in [cache['is_specular'], cache['is_polar_cell']]:
+            for row in grid:
+                for i in range(len(row)):
+                    row[i] = False
+        
+        for row in cache['final_colors']:
+            for i in range(len(row)):
+                row[i] = None
+    
+    return _grid_cache[key]
+
 def render_frame(theta: float, night_mode: bool = False) -> str:
     """
     Render using RASTERIZATION: for each screen position, raycast to sphere
@@ -655,18 +748,16 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
     cell_width = WIDTH
     cell_height = HEIGHT
     
-    # Each cell accumulates dot bits and color info
-    # We track land dots and ocean dots separately
-    land_grid = [[0 for _ in range(cell_width)] for _ in range(cell_height)]
-    ocean_grid = [[0 for _ in range(cell_width)] for _ in range(cell_height)]
-    land_colors = [[None for _ in range(cell_width)] for _ in range(cell_height)]
-    ocean_colors = [[None for _ in range(cell_width)] for _ in range(cell_height)]
-    land_intensities = [[0.0 for _ in range(cell_width)] for _ in range(cell_height)]
-    ocean_intensities = [[0.0 for _ in range(cell_width)] for _ in range(cell_height)]
-    land_counts = [[0 for _ in range(cell_width)] for _ in range(cell_height)]
-    ocean_counts = [[0 for _ in range(cell_width)] for _ in range(cell_height)]
-    is_specular = [[False for _ in range(cell_width)] for _ in range(cell_height)]
-    is_polar_cell = [[False for _ in range(cell_width)] for _ in range(cell_height)]
+    # OPTIMIZATION: Use cached grids instead of allocating new ones each frame
+    grids = get_or_create_grids(cell_width, cell_height)
+    land_grid = grids['land_grid']
+    ocean_grid = grids['ocean_grid']
+    land_intensities = grids['land_intensities']
+    ocean_intensities = grids['ocean_intensities']
+    land_counts = grids['land_counts']
+    ocean_counts = grids['ocean_counts']
+    is_specular = grids['is_specular']
+    is_polar_cell = grids['is_polar_cell']
     
     # Sphere radius - make it fit nicely with padding
     # Terminal chars are roughly 2x taller than wide, so adjust accordingly
@@ -733,10 +824,12 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
                 ry = sin_theta * sx + cos_theta * sy
                 rz = sz
 
-                # Get lat/lon at this rotated position - Inlined for performance
-                # lat, lon = to_latlon(rx, ry, rz)
-                lat = math.degrees(math.asin(max(-1.0, min(1.0, rz))))
-                lon = math.degrees(math.atan2(ry, rx))
+                # OPTIMIZATION: Skip redundant degrees() calls in inner loop
+                # Land lookup only needs 1-degree resolution, so round directly
+                lat_rad = math.asin(max(-1.0, min(1.0, rz)))
+                lon_rad = math.atan2(ry, rx)
+                lat = int(round(math.degrees(lat_rad)))
+                lon = int(round(math.degrees(lon_rad)))
 
                 # Sample terrain
                 terrain_is_land = is_land(lat, lon)
@@ -773,8 +866,9 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
     
     # Now build the final output grid
     # Strategy: Show LAND with Braille dots, ocean as a subtle background
-    final_grid = [[0 for _ in range(cell_width)] for _ in range(cell_height)]
-    final_colors = [[None for _ in range(cell_width)] for _ in range(cell_height)]
+    # OPTIMIZATION: Use cached final grids
+    final_grid = grids['final_grid']
+    final_colors = grids['final_colors']
     
     for cy in range(cell_height):
         for cx in range(cell_width):
@@ -872,9 +966,10 @@ def render_frame(theta: float, night_mode: bool = False) -> str:
         line = ""
         for cx in range(cell_width):
             if final_grid[cy][cx] > 0:
-                char = chr(BRAILLE_BASE + final_grid[cy][cx])
                 color = final_colors[cy][cx] or RESET
-                line += f"{color}{char}{RESET}"
+                # OPTIMIZATION: Use pre-computed Braille cache instead of f-string formatting
+                formatted = BRAILLE_CACHE.get((color, final_grid[cy][cx]), " ")
+                line += formatted
             else:
                 line += " "
         lines.append(line)
