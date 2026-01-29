@@ -1,0 +1,12 @@
+# Globe Renderer - Python Dependencies
+# ====================================
+
+# REQUIRED for improved geographic data (Natural Earth shapefile support)
+pyshp>=3.0.0
+
+# No other dependencies - standard library only for core functionality
+# This is intentional to keep the renderer lightweight and portable
+
+# Optional for future enhancements:
+# numpy  - For vectorized rendering (not needed yet)
+# PIL    - For image export (future enhancement)
